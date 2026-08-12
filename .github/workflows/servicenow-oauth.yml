@@ -1,1 +1,64 @@
+name: GitHub Issue to ServiceNow
 
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  update-servicenow:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get ServiceNow OAuth token
+        id: token
+        env:
+          SERVICENOW_URL: ${{ secrets.SERVICENOW_URL }}
+          CLIENT_ID: ${{ secrets.SERVICENOW_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.SERVICENOW_CLIENT_SECRET }}
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            "$SERVICENOW_URL/oauth_token.do" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$CLIENT_ID" \
+            --data-urlencode "client_secret=$CLIENT_SECRET" \
+            --data-urlencode "scope=github_incident")
+
+          ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+
+          if [ "$ACCESS_TOKEN" = "null" ] || [ -z "$ACCESS_TOKEN" ]; then
+            echo "Failed to obtain ServiceNow access token"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send closed issue to ServiceNow
+        env:
+          SERVICENOW_URL: ${{ secrets.SERVICENOW_URL }}
+          ACCESS_TOKEN: ${{ steps.token.outputs.access_token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          JSON=$(jq -n \
+            --arg action "closed" \
+            --arg number "$ISSUE_NUMBER" \
+            --arg title "$ISSUE_TITLE" \
+            --arg body "$ISSUE_BODY" \
+            '{
+              action: $action,
+              issue: {
+                number: ($number | tonumber),
+                title: $title,
+                body: $body
+              }
+            }')
+
+          curl -f -X POST \
+            "$SERVICENOW_URL/api/1894030/github_integration/issue" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$JSON"
